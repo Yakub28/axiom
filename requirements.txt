@@ -1,0 +1,8 @@
+# Axiom P1 — pinned, minimal. Everything runs locally and free.
+torch==2.2.2
+transformers==4.40.2
+qdrant-client==1.9.0
+streamlit==1.34.0
+pandas==2.2.2
+numpy==1.26.4
+tqdm==4.66.4
