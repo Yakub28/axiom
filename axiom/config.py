@@ -38,3 +38,24 @@ DEFAULT_TOP_K = 10
 #   - "expansion": wrap the terse query in an abstract-shaped sentence. No new
 #                  deps; works under the current pins. This is the active path.
 QUERY_EXPANSION_TEMPLATE = "This paper presents {query} for natural language processing."
+
+# --- Hybrid retrieval (dense + sparse) ---------------------------------------
+# Dense SPECTER2 captures meaning; a sparse BM25-style vector captures exact
+# terms/acronyms (LoRA, RAG, dataset names) that dense misses. Each point stores
+# two named vectors; results are fused with Reciprocal Rank Fusion.
+#
+# NOTE: qdrant-client==1.9.0 has sparse vectors but NOT the Query-API fusion
+# primitives (Prefetch/FusionQuery, client >= 1.10). We therefore run two native
+# searches and fuse with RRF in Python — no pin bump required.
+DENSE_VECTOR_NAME = "dense"
+SPARSE_VECTOR_NAME = "sparse"
+SPARSE_VOCAB_SIZE = 2 ** 20      # hashing-trick index space (fits uint32)
+BM25_K1 = 1.5                    # BM25 term-frequency saturation
+BM25_B = 0.75                    # BM25 length normalization
+RRF_K = 60                       # reciprocal-rank-fusion constant
+HYBRID_CANDIDATES = 20           # candidates pulled from each arm before fusion
+# Tiny stopword set so terse keyword queries aren't dominated by glue words.
+SPARSE_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with",
+    "is", "are", "be", "by", "as", "at", "that", "this", "from", "how",
+})

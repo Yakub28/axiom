@@ -86,15 +86,17 @@ with st.container():
     with fcol2:
         if bounds:
             lo, hi = bounds
-            if lo == hi:
-                year_range = (lo, hi)
-                st.caption(f"Year: {lo}")
-            else:
-                # Default to the full [min, max] span so nothing is filtered out.
-                year_range = st.slider(
-                    "Year range", lo, hi, (lo, hi),
-                    help="Defaults to the full corpus span.",
-                )
+            years = list(range(lo, hi + 1))
+            # Two selectboxes instead of a range slider: a range slider overlaps
+            # its two value labels when both handles sit on the same year. From/To
+            # makes a single-year pick explicit (From == To) with no overlap.
+            ycol1, ycol2 = st.columns(2)
+            with ycol1:
+                y_from = st.selectbox("From year", years, index=0)
+            with ycol2:
+                y_to = st.selectbox("To year", years, index=len(years) - 1)
+            # Tolerate From > To by normalizing the bounds.
+            year_range = (min(y_from, y_to), max(y_from, y_to))
         else:
             year_range = None
     with fcol3:
@@ -115,12 +117,17 @@ if query:
     encoder = get_encoder()
     qvec = encoder.encode_query(query)
 
-    hits = store.search(
-        query_vector=qvec,
+    common = dict(
         top_k=int(top_k),
         venues=selected_venues or None,
         year_range=tuple(year_range) if year_range else None,
     )
+    # Prefer hybrid (dense + sparse) when the index supports it; fall back to
+    # pure dense otherwise (e.g. an index built before the hybrid upgrade).
+    if store.supports_hybrid():
+        hits = store.search_hybrid(query_vector=qvec, query_text=query, **common)
+    else:
+        hits = store.search(query_vector=qvec, **common)
 
     if not hits:
         st.info("No papers match the current filters. Loosen the venue/year filters.")

@@ -19,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from axiom import config, db
 from axiom.embed import Specter2Encoder
 from axiom.qdrant_client import AxiomQdrant
+from axiom.sparse import BM25SparseEncoder
 
 # ---------------------------------------------------------------------------
 # Synthetic corpus: 30 plausible ACL-style NLP papers, 2021–2025.
@@ -445,6 +446,21 @@ def load_qdrant() -> None:
     print(f"[embed] encoding {len(rows)} abstracts on device={encoder.device}...")
     vectors = encoder.encode(titles, abstracts)
 
+    # Sparse BM25-style vectors over title + abstract + concepts, so exact terms
+    # and acronyms (LoRA, RAG) match in the hybrid arm.
+    sparse_docs = [
+        " ".join([
+            r["title"] or "",
+            r["abstract"] or "",
+            " ".join(concepts_by_paper.get(r["openalex_id"], [])),
+        ])
+        for r in rows
+    ]
+    bm25 = BM25SparseEncoder(sparse_docs)
+    sparse_vectors = [bm25.encode_document(doc) for doc in sparse_docs]
+    print(f"[sparse] built BM25 vectors (avgdl={bm25.avgdl:.1f}, "
+          f"vocab={len(bm25.idf)} terms)")
+
     payloads = [
         {
             "paper_id": r["openalex_id"],
@@ -460,8 +476,9 @@ def load_qdrant() -> None:
     store = AxiomQdrant()
     print(f"[qdrant] recreating collection '{store.collection}'...")
     store.recreate_collection()  # idempotent wipe + recreate
-    store.upsert_papers(payloads, vectors)
-    print(f"[qdrant] upserted {store.count()} points into '{store.collection}'")
+    store.upsert_papers(payloads, vectors, sparse_vectors=sparse_vectors)
+    print(f"[qdrant] upserted {store.count()} points into '{store.collection}' "
+          f"(dense + sparse)")
 
 
 def main() -> None:
