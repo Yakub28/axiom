@@ -27,3 +27,14 @@ VECTOR_SIZE = 768
 
 # Default search fan-out.
 DEFAULT_TOP_K = 10
+
+# --- Query-side embedding ----------------------------------------------------
+# Terse queries ("LoRA", "TOOLS for AI") embed poorly when treated as documents
+# and land in a mushy region of the space (flat ~0.82-0.88 scores). Two paths
+# nudge the query vector toward the document region:
+#   - "adapter":   SPECTER2 ad-hoc query adapter. Best, BUT the `adapters` lib
+#                  pins transformers~=4.57, conflicting with our pinned 4.40.2,
+#                  so it is unavailable without a committed-decision pin bump.
+#   - "expansion": wrap the terse query in an abstract-shaped sentence. No new
+#                  deps; works under the current pins. This is the active path.
+QUERY_EXPANSION_TEMPLATE = "This paper presents {query} for natural language processing."
