@@ -78,7 +78,11 @@ venues, bounds = get_filter_options()
 with st.container():
     fcol1, fcol2, fcol3 = st.columns([2, 2, 1])
     with fcol1:
-        selected_venues = st.multiselect("Venue", options=venues, default=[])
+        # Empty selection = all venues (no silent filtering).
+        selected_venues = st.multiselect(
+            "Venue", options=venues, default=[],
+            help="Leave empty to search all venues.",
+        )
     with fcol2:
         if bounds:
             lo, hi = bounds
@@ -86,12 +90,19 @@ with st.container():
                 year_range = (lo, hi)
                 st.caption(f"Year: {lo}")
             else:
-                year_range = st.slider("Year range", lo, hi, (lo, hi))
+                # Default to the full [min, max] span so nothing is filtered out.
+                year_range = st.slider(
+                    "Year range", lo, hi, (lo, hi),
+                    help="Defaults to the full corpus span.",
+                )
         else:
             year_range = None
     with fcol3:
-        top_k = st.number_input("Top-K", min_value=1, max_value=30,
-                                value=config.DEFAULT_TOP_K, step=1)
+        # Default to DEFAULT_TOP_K; cap at corpus size (no magic 30).
+        top_k = st.number_input(
+            "Top-K", min_value=1, max_value=point_count,
+            value=min(config.DEFAULT_TOP_K, point_count), step=1,
+        )
 
 
 # --- Query -------------------------------------------------------------------
