@@ -125,6 +125,25 @@ def iter_papers(conn: sqlite3.Connection) -> Sequence[sqlite3.Row]:
     ).fetchall()
 
 
+def papers_by_ids(
+    conn: sqlite3.Connection, ids: Sequence[str]
+) -> dict[str, sqlite3.Row]:
+    """Fetch full paper rows (incl. abstract, doi) keyed by openalex_id.
+
+    Used by the UI to enrich lean Qdrant hits with abstract/DOI at render time.
+    """
+    ids = list(ids)
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        f"SELECT openalex_id, title, abstract, publication_year, venue, "
+        f"cited_by_count, doi FROM papers WHERE openalex_id IN ({placeholders})",
+        ids,
+    ).fetchall()
+    return {r["openalex_id"]: r for r in rows}
+
+
 # TODO(P2): the ingestion track plugs in here — replace synthetic loading with
 # OpenAlex fetch + inverted-index abstract reconstruction, writing into the same
 # tables via these helpers so the contract stays stable.

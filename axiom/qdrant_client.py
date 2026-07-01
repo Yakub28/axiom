@@ -18,6 +18,7 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     MatchAny,
+    MatchValue,
     NamedSparseVector,
     NamedVector,
     PointStruct,
@@ -210,6 +211,11 @@ class AxiomQdrant:
                 limit=n,
                 with_payload=True,
             )
+            # With a payload filter, Qdrant returns ALL filtered points for a
+            # sparse query — including zero-overlap ones scored 0.0. Those are
+            # non-matches; keep only genuine keyword hits so they don't earn RRF
+            # rank credit and flatten the fusion.
+            sparse_hits = [r for r in sparse_hits if r.score > 0.0]
 
         # Reciprocal Rank Fusion: score = sum 1/(RRF_K + rank), rank 1-based.
         fused: dict[int, float] = {}
@@ -221,6 +227,63 @@ class AxiomQdrant:
 
         ranked = sorted(fused.items(), key=lambda kv: kv[1], reverse=True)[:top_k]
         return [self._to_hit(payloads[pid], score) for pid, score in ranked]
+
+    def similar_papers(
+        self,
+        paper_id: str,
+        top_k: int = config.DEFAULT_TOP_K,
+        venues: list[str] | None = None,
+        year_range: tuple[int, int] | None = None,
+    ) -> list[SearchHit]:
+        """Semantic 'more like this': nearest dense neighbors of a given paper.
+
+        Fetches the paper's stored dense vector, reuses the dense search path,
+        and drops the paper itself from the results.
+        """
+        found, _ = self.client.scroll(
+            collection_name=self.collection,
+            scroll_filter=Filter(
+                must=[FieldCondition(key="paper_id", match=MatchValue(value=paper_id))]
+            ),
+            with_vectors=True,
+            limit=1,
+        )
+        if not found:
+            return []
+        vectors = found[0].vector or {}
+        dense_vec = vectors.get(config.DENSE_VECTOR_NAME) if isinstance(vectors, dict) else None
+        if dense_vec is None:
+            return []
+        # Pull one extra, then drop the self-hit.
+        hits = self.search(dense_vec, top_k=top_k + 1, venues=venues, year_range=year_range)
+        return [h for h in hits if h.paper_id != paper_id][:top_k]
+
+    def fetch_dense_vectors(self, batch: int = 256) -> dict[str, list[float]]:
+        """Return {paper_id: dense_vector} for every point in the collection.
+
+        Used by the gap-detection track to build per-cluster embedding centroids.
+        Scrolls the whole collection (one point per paper) in pages.
+        """
+        out: dict[str, list[float]] = {}
+        offset = None
+        while True:
+            points, offset = self.client.scroll(
+                collection_name=self.collection,
+                with_vectors=True,
+                with_payload=True,
+                limit=batch,
+                offset=offset,
+            )
+            for p in points:
+                vectors = p.vector or {}
+                dense = (vectors.get(config.DENSE_VECTOR_NAME)
+                         if isinstance(vectors, dict) else None)
+                pid = (p.payload or {}).get("paper_id")
+                if pid and dense is not None:
+                    out[pid] = dense
+            if offset is None:
+                break
+        return out
 
 
 # TODO(P2): the velocity engine and citation-graph tracks will read the same

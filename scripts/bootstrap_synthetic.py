@@ -17,9 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from axiom import config, db
-from axiom.embed import Specter2Encoder
-from axiom.qdrant_client import AxiomQdrant
-from axiom.sparse import BM25SparseEncoder
+from axiom.indexer import reindex_qdrant
 
 # ---------------------------------------------------------------------------
 # Synthetic corpus: 30 plausible ACL-style NLP papers, 2021–2025.
@@ -428,62 +426,9 @@ def load_sqlite() -> None:
     conn.close()
 
 
-def load_qdrant() -> None:
-    conn = db.connect()
-    rows = db.iter_papers(conn)
-
-    # Map paper_id -> concept list for the payload.
-    concept_rows = conn.execute("SELECT paper_id, concept FROM concepts").fetchall()
-    concepts_by_paper: dict[str, list[str]] = {}
-    for r in concept_rows:
-        concepts_by_paper.setdefault(r["paper_id"], []).append(r["concept"])
-    conn.close()
-
-    print(f"[embed] loading {config.MODEL_ID} (first run downloads weights)...")
-    encoder = Specter2Encoder()
-    titles = [r["title"] for r in rows]
-    abstracts = [r["abstract"] for r in rows]
-    print(f"[embed] encoding {len(rows)} abstracts on device={encoder.device}...")
-    vectors = encoder.encode(titles, abstracts)
-
-    # Sparse BM25-style vectors over title + abstract + concepts, so exact terms
-    # and acronyms (LoRA, RAG) match in the hybrid arm.
-    sparse_docs = [
-        " ".join([
-            r["title"] or "",
-            r["abstract"] or "",
-            " ".join(concepts_by_paper.get(r["openalex_id"], [])),
-        ])
-        for r in rows
-    ]
-    bm25 = BM25SparseEncoder(sparse_docs)
-    sparse_vectors = [bm25.encode_document(doc) for doc in sparse_docs]
-    print(f"[sparse] built BM25 vectors (avgdl={bm25.avgdl:.1f}, "
-          f"vocab={len(bm25.idf)} terms)")
-
-    payloads = [
-        {
-            "paper_id": r["openalex_id"],
-            "title": r["title"],
-            "year": r["publication_year"],
-            "venue": r["venue"],
-            "cited_by_count": r["cited_by_count"],
-            "concepts": concepts_by_paper.get(r["openalex_id"], []),
-        }
-        for r in rows
-    ]
-
-    store = AxiomQdrant()
-    print(f"[qdrant] recreating collection '{store.collection}'...")
-    store.recreate_collection()  # idempotent wipe + recreate
-    store.upsert_papers(payloads, vectors, sparse_vectors=sparse_vectors)
-    print(f"[qdrant] upserted {store.count()} points into '{store.collection}' "
-          f"(dense + sparse)")
-
-
 def main() -> None:
     load_sqlite()
-    load_qdrant()
+    reindex_qdrant()
     print("\nBootstrap complete. Run:  streamlit run app/streamlit_app.py")
 
 

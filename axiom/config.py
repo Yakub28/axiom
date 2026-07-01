@@ -20,6 +20,25 @@ QDRANT_PORT = 6333
 # dimensionality changes so old/new points never mix.
 COLLECTION_NAME = "axiom_v1"
 
+# --- OpenAlex ingestion ------------------------------------------------------
+# Source of truth (decision: Data layer = OpenAlex -> SQLite). No API key needed;
+# OpenAlex asks only for a `mailto` to join the faster "polite pool".
+#
+# Corpus is built by SNOWBALL / 2-hop expansion (decision OD7): seed on a topic,
+# then pull in the papers the seeds cite (referenced_works[]) AND papers that
+# cite the seeds. This densifies *internal* citation edges so the graph is
+# actually connected, instead of a star of dangling external edges.
+OPENALEX_BASE = "https://api.openalex.org"
+OPENALEX_MAILTO = "yakub.yakubov.business@gmail.com"   # polite-pool contact
+OPENALEX_TIMEOUT = 30.0                                 # per-request seconds
+OPENALEX_MAX_RETRIES = 3                                # transient-error retries
+
+SEED_QUERY = "retrieval-augmented generation"           # default seed topic
+SEED_COUNT = 50                                         # most-cited seeds to start
+CORPUS_TARGET = 500                                     # snowball stops at ~this many papers
+CITERS_PER_SEED = 25                                    # capped citers pulled per seed (per hop)
+OPENALEX_BATCH_SIZE = 50                                # ids per `openalex_id:a|b|...` fetch
+
 # --- Embeddings --------------------------------------------------------------
 # Committed team decision: SPECTER2, 768-dim. Do NOT silently swap models.
 MODEL_ID = "allenai/specter2_base"
