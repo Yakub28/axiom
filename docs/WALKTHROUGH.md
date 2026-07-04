@@ -1,5 +1,15 @@
 # Axiom P1 — Complete Walkthrough
 
+> **⚠️ Historical, P1-only.** Written 2026-06-04 for the very first
+> data-foundation seam. Everything in its own §13 "P2 seams" table has since
+> been built — velocity (OD10), citation graph + gaps (OD9), FastAPI (OD12),
+> keyword canonicalization + reading-list summaries (OD14) — see
+> `docs/DECISIONS.md` (OD6–OD14) for what actually shipped, `README.md` for
+> the current run order, and `docs/demo_examples.md` for real output of every
+> built feature. This file is kept as-is below for its still-accurate detail
+> on the original SQLite/Qdrant/SPECTER2 seam and the search-quality upgrades
+> — just don't read its "out of scope" claims as current.
+
 A full, self-contained explanation of the **P1 data-foundation seam** and the
 **search-quality upgrades** built on top of it: what each piece is, why it
 exists, how the data flows, how to run it, and how every claim was verified with

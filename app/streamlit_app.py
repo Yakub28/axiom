@@ -17,15 +17,16 @@ from pathlib import Path
 # Make the repo root importable when Streamlit runs this file directly.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import networkx as nx
 import streamlit as st
 import streamlit.components.v1 as components
 
-from axiom import config, db, gaps, graph
+from axiom import config, db, gaps, graph, hypothesis, llm, summarize, velocity
 from axiom.embed import Specter2Encoder
 from axiom.qdrant_client import AxiomQdrant, SearchHit
 
 st.set_page_config(page_title="Axiom — Thesis Discovery", layout="wide")
-st.title("Axiom — Semantic Search + Citation Graph")
+st.title("Axiom — Research Trends & Gaps Discovery")
 st.caption(
     f"Collection `{config.COLLECTION_NAME}` · model `{config.MODEL_ID}` · "
     "OpenAlex corpus"
@@ -44,23 +45,33 @@ def get_store() -> AxiomQdrant:
 
 
 @st.cache_resource(show_spinner="Loading citation graph…")
-def get_graph():
+def get_graph() -> nx.DiGraph:
     """In-memory citation graph from SQLite (decision OD6, NetworkX-first)."""
     return graph.load_graph()
 
 
 @st.cache_data(show_spinner=False)
-def get_influence_ranking(top_k: int = 50):
+def get_influence_ranking(top_k: int = 50) -> list:
     """PageRank-ranked influential papers (cached; slice for the UI)."""
     return graph.influence(get_graph(), top_k=top_k)
 
 
 @st.cache_data(show_spinner="Detecting communities & research gaps…")
-def get_gap_analysis():
+def get_gap_analysis() -> gaps.GapAnalysis:
     """Communities + candidate research gaps (cached). Needs Qdrant vectors."""
     conn = db.connect()
     try:
         return gaps.analyze(get_graph(), conn, get_store().fetch_dense_vectors())
+    finally:
+        conn.close()
+
+
+@st.cache_data(show_spinner="Computing keyword velocity…")
+def get_velocity_analysis(venue: str | None, year_range: tuple[int, int] | None) -> velocity.VelocityAnalysis:
+    """Concept velocity: normalized-frequency log2-ratio, recent vs prior window (OD10)."""
+    conn = db.connect()
+    try:
+        return velocity.get_top_velocity_keywords(conn, n=50, venue=venue, year_range=year_range)
     finally:
         conn.close()
 
@@ -80,14 +91,15 @@ def _community_color(cid: int) -> str:
 @st.cache_data(show_spinner=False)
 def get_filter_options() -> tuple[list[str], tuple[int, int] | None]:
     """Venue list + year bounds from SQLite (drives the filter bar)."""
+    conn = db.connect()
     try:
-        conn = db.connect()
         venues = db.distinct_venues(conn)
         bounds = db.year_bounds(conn)
-        conn.close()
         return venues, bounds
     except Exception:
         return [], None
+    finally:
+        conn.close()
 
 
 @st.cache_data(show_spinner=False)
@@ -97,17 +109,29 @@ def get_meta() -> dict[str, dict]:
     Qdrant payloads are intentionally lean; the cards enrich hits from SQLite,
     the durable source of truth.
     """
+    conn = db.connect()
     try:
-        conn = db.connect()
-        ids = [r["openalex_id"] for r in db.iter_papers(conn)]
-        rows = db.papers_by_ids(conn, ids)
-        conn.close()
+        rows = conn.execute("SELECT openalex_id, title, abstract, doi FROM papers").fetchall()
         return {
-            pid: {"title": r["title"], "abstract": r["abstract"], "doi": r["doi"]}
-            for pid, r in rows.items()
+            r["openalex_id"]: {"title": r["title"], "abstract": r["abstract"], "doi": r["doi"]}
+            for r in rows
         }
     except Exception:
         return {}
+    finally:
+        conn.close()
+
+def render_year_filter(bounds: tuple[int, int] | None, key_prefix: str) -> tuple[int, int] | None:
+    if not bounds:
+        return None
+    lo, hi = bounds
+    years = list(range(lo, hi + 1))
+    ycol1, ycol2 = st.columns(2)
+    with ycol1:
+        y_from = st.selectbox("From year", years, index=0, key=f"{key_prefix}_from")
+    with ycol2:
+        y_to = st.selectbox("To year", years, index=len(years) - 1, key=f"{key_prefix}_to")
+    return (min(y_from, y_to), max(y_from, y_to))
 
 
 # --- Guard rails: Qdrant reachable & index non-empty -------------------------
@@ -132,26 +156,60 @@ meta = get_meta()
 st.session_state.setdefault("similar_to", None)
 
 
+# --- Reading list (OD13): bookmarks only, no LLM summaries (PBI 5 not built) --
+def get_bookmarked_ids() -> set[str]:
+    """Not cached — must reflect adds/removes immediately on the next rerun."""
+    conn = db.connect()
+    try:
+        return {r["paper_id"] for r in db.list_bookmarks(conn)}
+    finally:
+        conn.close()
+
+
+def toggle_bookmark(paper_id: str, *, add: bool) -> None:
+    conn = db.connect()
+    try:
+        if add:
+            db.add_bookmark(conn, paper_id)
+        else:
+            db.remove_bookmark(conn, paper_id)
+    finally:
+        conn.close()
+
+
 # --- Result rendering --------------------------------------------------------
-def render_hits(hits: list[SearchHit]) -> None:
+def render_hits(hits: list[SearchHit], *, score_label: str = "score") -> None:
     """Render hits as expandable cards with concepts, abstract, and a pivot."""
     if not hits:
         st.info("No papers match the current filters. Loosen the venue/year filters.")
         return
+    meta = get_meta()
+    bookmarked = get_bookmarked_ids()
     st.write(f"**{len(hits)} results**")
     for h in hits:
         m = meta.get(h.paper_id, {})
-        label = f"{h.score:.3f} · {h.title}  ({h.year} · {h.venue} · {h.cited_by_count} cites)"
+        label = f"{h.score:.4f} ({score_label}) · {h.title}  ({h.year} · {h.venue} · {h.cited_by_count} cites)"
         with st.expander(label):
             if m.get("doi"):
                 st.markdown(f"[Open paper (DOI)](https://doi.org/{m['doi']})")
             if h.concepts:
                 st.markdown(" ".join(f"`{c}`" for c in h.concepts))
             st.write(m.get("abstract") or "_No abstract available._")
-            # Pivot: explore semantic neighbors of this paper.
-            if st.button("🔎 Similar papers", key=f"sim_{h.paper_id}"):
-                st.session_state["similar_to"] = h.paper_id
-                st.rerun()
+            bcol, scol = st.columns([1, 1])
+            with bcol:
+                if h.paper_id in bookmarked:
+                    if st.button("📚 Remove bookmark", key=f"unbm_{h.paper_id}"):
+                        toggle_bookmark(h.paper_id, add=False)
+                        st.rerun()
+                else:
+                    if st.button("📚 Add to reading list", key=f"bm_{h.paper_id}"):
+                        toggle_bookmark(h.paper_id, add=True)
+                        st.rerun()
+            with scol:
+                # Pivot: explore semantic neighbors of this paper.
+                if st.button("🔎 Similar papers", key=f"sim_{h.paper_id}"):
+                    st.session_state["similar_to"] = h.paper_id
+                    st.rerun()
 
 
 # --- Search tab --------------------------------------------------------------
@@ -167,21 +225,7 @@ def render_search() -> None:
                 help="Leave empty to search all venues.",
             )
         with fcol2:
-            if bounds:
-                lo, hi = bounds
-                years = list(range(lo, hi + 1))
-                # Two selectboxes instead of a range slider: a range slider
-                # overlaps its two value labels when both handles sit on the same
-                # year. From/To makes a single-year pick explicit (From == To).
-                ycol1, ycol2 = st.columns(2)
-                with ycol1:
-                    y_from = st.selectbox("From year", years, index=0)
-                with ycol2:
-                    y_to = st.selectbox("To year", years, index=len(years) - 1)
-                # Tolerate From > To by normalizing the bounds.
-                year_range = (min(y_from, y_to), max(y_from, y_to))
-            else:
-                year_range = None
+            year_range = render_year_filter(bounds, "search")
         with fcol3:
             # Default to DEFAULT_TOP_K; cap at corpus size (no magic number).
             top_k = st.number_input(
@@ -215,7 +259,7 @@ def render_search() -> None:
         if st.button("← Back to search"):
             st.session_state["similar_to"] = None
             st.rerun()
-        render_hits(store.similar_papers(similar_to, **common))
+        render_hits(store.similar_papers(similar_to, **common), score_label="cosine")
     else:
         query = st.text_input(
             "Search query",
@@ -227,7 +271,7 @@ def render_search() -> None:
                 hits = store.search_hybrid(query_vector=qvec, query_text=query, **common)
             else:
                 hits = store.search(query_vector=qvec, **common)
-            render_hits(hits)
+            render_hits(hits, score_label="RRF rank" if use_hybrid else "cosine")
         else:
             st.info("Enter a query above to search the corpus.")
 
@@ -235,7 +279,7 @@ def render_search() -> None:
 # --- Citation-graph tab ------------------------------------------------------
 _GRAPH3D_TEMPLATE = """
 <div id="graph3d" style="width:100%;height:HEIGHTpx;background:#0b0f19;border-radius:10px;"></div>
-<script src="https://unpkg.com/3d-force-graph@1.73.4/dist/3d-force-graph.min.js"></script>
+<script src="https://unpkg.com/3d-force-graph@1.73.4/dist/3d-force-graph.min.js" integrity="sha384-GNPicn8pBA2/PGSyPTpxIlPurgLUYcNYJ2zskIq782dE9+gp5E32WSyuxZqA7J+u" crossorigin="anonymous"></script>
 <script>
 (function () {
   var el = document.getElementById('graph3d');
@@ -324,27 +368,27 @@ _GRAPH3D_TEMPLATE = """
 
 def _graph_html(sub, focus_id: str | None = None,
                 node_colors: dict[str, str] | None = None, height: int = 650) -> str:
-    """Render a citation subgraph as an interactive 3D force-directed graph.
-
-    Node size scales with in-degree within the subgraph (local prominence).
-    Colour: per-node `node_colors` (e.g. by community) if given, the focused
-    paper always orange, else default blue. Edges flow citing -> cited with
-    directional particles. Library loads from CDN (needs internet in browser).
+def _graph_html(sub: nx.DiGraph, node_colors: dict[str, str] | None = None,
+                node_cids: dict[str, int] | None = None, height: int = 500) -> str:
+    """
+    Renders sub to an interactive 3d-force-graph HTML snippet.
+    node_colors dict maps openalex_id -> hex color.
     """
     indeg = dict(sub.in_degree())
     max_in = max(indeg.values(), default=0) or 1
     nodes = []
     for nid, d in sub.nodes(data=True):
         title = d.get("title") or nid
-        if focus_id and nid == focus_id:
-            color = "#ff922b"
-        elif node_colors and nid in node_colors:
+        if node_colors and nid in node_colors:
             color = node_colors[nid]
         else:
             color = "#4dabf7"
+            
+        cluster_str = f"[Cluster: {node_cids[nid]}] " if node_cids and nid in node_cids else ""
+        
         nodes.append({
             "id": nid,
-            "name": (f"{title} ({d.get('year', '?')}) — "
+            "name": (f"{cluster_str}{title} ({d.get('year', '?')}) — "
                      f"{d.get('cited_by_count', 0)} cites · "
                      f"{indeg.get(nid, 0)} citing within view"),
             "val": 2 + 9 * (indeg.get(nid, 0) / max_in),
@@ -352,6 +396,7 @@ def _graph_html(sub, focus_id: str | None = None,
         })
     links = [{"source": u, "target": v} for u, v in sub.edges()]
     payload = json.dumps({"nodes": nodes, "links": links})
+    payload = payload.replace("</", "<\\/")
     return _GRAPH3D_TEMPLATE.replace("HEIGHT", str(height)).replace("__DATA__", payload)
 
 
@@ -415,18 +460,20 @@ def render_graph_view() -> None:
                      "clusters — the openings. 'Top influential' is for orientation: "
                      "the field's central papers. Click any node to inspect it.",
             )
-        focus_id = None
         sel_gap = None
+        sel_gap_idx = None
         with ccol2:
             if view == "Research gaps":
                 if analysis.gaps:
-                    opts = {
-                        f"{_short(gp.a)} ⟷ {_short(gp.b)}  "
-                        f"(sim {gp.semantic_similarity:.2f} · {gp.inter_citations} cites)": i
+                    opts = [
+                        f"#{i} {_short(gp.a)} ⟷ {_short(gp.b)}  "
+                        f"(sim {gp.semantic_similarity:.2f} · {gp.inter_citations} cites)"
                         for i, gp in enumerate(analysis.gaps)
-                    }
-                    sel = st.selectbox("Candidate gap", list(opts.keys()))
-                    sel_gap = analysis.gaps[opts[sel]]
+                    ]
+                    sel = st.selectbox("Candidate gap", range(len(opts)),
+                                       format_func=lambda i: opts[i])
+                    sel_gap_idx = sel
+                    sel_gap = analysis.gaps[sel_gap_idx]
                     members = set(sel_gap.a.members) | set(sel_gap.b.members)
                     sub = g.subgraph(members).copy()
                 else:
@@ -440,15 +487,10 @@ def render_graph_view() -> None:
             show_3d = st.toggle("Show 3D graph", value=True,
                                 help="Turn off to scroll the page freely past this section.")
 
-    # Legend split: "what you're looking at" (left) vs "how to use it" (right).
-    legend_focus = (
-        '<span style="display:inline-flex;align-items:center;gap:6px;">'
-        '<span style="width:13px;height:13px;background:#ff922b;border-radius:50%;'
-        'display:inline-block;"></span>centered paper</span>'
-    ) if focus_id else ""
+    # Legend split:
     st.markdown(
         '<div style="display:flex;flex-wrap:wrap;justify-content:space-between;'
-        'align-items:center;gap:16px;font-size:0.86rem;color:#374151;margin:2px 0 8px;">'
+        'align-items:center;gap:16px;font-size:0.86rem;margin:2px 0 8px;">'
         # left group — what you're looking at
         '<div style="display:flex;flex-wrap:wrap;gap:18px;align-items:center;">'
         f'<span><b>{sub.number_of_nodes()}</b> papers · '
@@ -458,10 +500,9 @@ def render_graph_view() -> None:
         '<span style="width:7px;height:7px;background:#868e96;border-radius:50%;display:inline-block;"></span>fewer'
         '<span style="width:17px;height:17px;background:#868e96;border-radius:50%;display:inline-block;"></span>'
         'more citations</span>'
-        f'{legend_focus}'
         '</div>'
-        # right group — how to use it
-        '<div style="color:#6b7280;white-space:nowrap;">'
+        # right group
+        '<div style="color:#9ca3af;white-space:nowrap;">'
         'drag rotate · +/–/▣ zoom · click node to fly · wheel scrolls page'
         '</div>'
         '</div>',
@@ -469,12 +510,57 @@ def render_graph_view() -> None:
     )
     if show_3d:
         components.html(
-            _graph_html(sub, focus_id=focus_id, node_colors=node_colors, height=520),
+            _graph_html(sub, node_colors=node_colors, node_cids=analysis.node2c, height=520),
             height=540, scrolling=False)
 
     # Gap detail + ranked list (gaps view only).
     if view == "Research gaps" and sel_gap is not None:
         _render_gap_detail(g, sel_gap)
+
+        st.info(
+            "⚠️ **Unverified Candidate** — a hypothesis pitch below is an "
+            "LLM-generated narrative over this gap candidate, not a validated "
+            "research direction. Nothing is promoted without an explicit "
+            "approve in the 🗂️ Review queue tab."
+        )
+        if st.button("💡 Generate hypothesis pitch", key=f"hyp_{sel_gap_idx}"):
+            v = get_velocity_analysis(None, None)
+            trend_context = [k.concept for k in v.keywords if k.velocity > 0][:5]
+            with st.spinner("Generating + verifying pitch locally…"):
+                try:
+                    pitch = hypothesis.generate_hypothesis(
+                        sel_gap, g, trend_context=trend_context
+                    )
+                    conn = db.connect()
+                    try:
+                        db.add_to_review_queue(
+                            conn, gap_a_label=sel_gap.a.label, gap_b_label=sel_gap.b.label,
+                            title=pitch.title, claim=pitch.claim,
+                            method_sketch=pitch.method_sketch, datasets=pitch.datasets,
+                            supporting_paper_ids=pitch.supporting_paper_ids,
+                        )
+                    finally:
+                        conn.close()
+                    st.session_state["last_pitch"] = (sel_gap_idx, pitch)
+                except llm.OllamaError as exc:
+                    st.error(f"Ollama error: {exc}")
+                except hypothesis.VerificationError as exc:
+                    st.error(f"Verifier rejected every attempt: {exc}")
+
+        _stored = st.session_state.get("last_pitch")
+        if _stored is not None and _stored[0] == sel_gap_idx:
+            last_pitch = _stored[1]
+            st.markdown(f"##### {last_pitch.title}")
+            st.write(last_pitch.claim)
+            st.markdown(f"**Method sketch:** {last_pitch.method_sketch}")
+            if last_pitch.datasets:
+                st.markdown("**Datasets:** " + ", ".join(f"`{d}`" for d in last_pitch.datasets))
+            st.markdown(
+                "**Supporting papers:** " +
+                ", ".join(f"`{pid}`" for pid in last_pitch.supporting_paper_ids)
+            )
+            st.caption(f"⚠️ {last_pitch.disclaimer} Sent to the Review queue as pending.")
+
         with st.expander(f"All {len(analysis.gaps)} candidate gaps (ranked)"):
             for i, gp in enumerate(analysis.gaps, 1):
                 st.markdown(
@@ -507,9 +593,191 @@ def render_graph_view() -> None:
                     st.markdown(f"- {c['title']}  _({c['year']} · {c['cited_by_count']} cites)_")
 
 
+# --- Trending tab -------------------------------------------------------------
+def render_trending() -> None:
+    """Concepts ranked by velocity: normalized-frequency log2-ratio, recent vs prior window."""
+    st.subheader("Trending concepts")
+    st.caption(
+        "Concepts ranked by velocity: how much their share of the corpus has "
+        "changed between the older and newer half of the available years. "
+        "Positive = rising, negative = fading. Counts below "
+        f"{config.VELOCITY_MIN_FREQ} recent papers are flagged low-confidence."
+    )
+    st.info(
+        "ℹ️ **Heuristic signal** — velocity ranks concepts by corpus frequency "
+        "change, not by verified research impact. Treat as directional, not definitive."
+    )
+
+    venues, bounds = get_filter_options()
+    fcol1, fcol2 = st.columns([1, 2])
+    with fcol1:
+        venue_choice = st.selectbox("Venue", ["All venues"] + venues, index=0,
+                                    key="trend_venue")
+        venue = None if venue_choice == "All venues" else venue_choice
+    with fcol2:
+        year_range = render_year_filter(bounds, "trend")
+
+    analysis = get_velocity_analysis(venue, year_range)
+    if not analysis.keywords:
+        st.info("Not enough dated papers to compute velocity for this filter.")
+        return
+    if analysis.insufficient_year_spread:
+        st.warning("Selected range spans a single year — velocity needs at least two years to compare.")
+
+    st.caption(
+        f"Prior window {analysis.prior_window[0]}–{analysis.prior_window[1]} "
+        f"({analysis.total_prior} papers) → Recent window "
+        f"{analysis.recent_window[0]}–{analysis.recent_window[1]} "
+        f"({analysis.total_recent} papers)"
+    )
+
+    rising = [k for k in analysis.keywords if k.velocity > 0][:15]
+    if rising:
+        st.markdown("##### Top risers")
+        st.bar_chart({k.concept: k.velocity for k in rising})
+
+    st.markdown("##### Ranked keywords")
+    for i, k in enumerate(analysis.keywords, 1):
+        flag = " ⚠️ low-volume" if k.low_confidence else ""
+        st.markdown(
+            f"{i}. **{k.concept}** — velocity `{k.velocity:+.2f}`{flag}  "
+            f"({k.prior_count} → {k.recent_count} papers)"
+        )
+
+
+# --- Reading list tab ---------------------------------------------------------
+def render_reading_list() -> None:
+    """Bookmarked papers, with 3-bullet local-LLM summaries (OD14)."""
+    st.subheader("Reading list")
+    st.caption(
+        f"Papers bookmarked from Search. Summaries are generated locally via "
+        f"Ollama (`{config.OLLAMA_MODEL}`, OD14) — grounded only in the "
+        f"paper's own abstract, cached after the first request."
+    )
+    conn = db.connect()
+    try:
+        rows = db.list_bookmarks(conn)
+    finally:
+        conn.close()
+
+    if not rows:
+        st.info("No bookmarks yet — add one from a Search result card.")
+        return
+
+    st.write(f"**{len(rows)} bookmarked papers**")
+    for r in rows:
+        label = f"{r['title']}  ({r['publication_year']} · {r['venue']} · {r['cited_by_count']} cites)"
+        with st.expander(label):
+            if r["doi"]:
+                st.markdown(f"[Open paper (DOI)](https://doi.org/{r['doi']})")
+            st.write(r["abstract"] or "_No abstract available._")
+
+            conn3 = db.connect()
+            try:
+                bullets = db.get_summary(conn3, r["paper_id"])
+            finally:
+                conn3.close()
+
+            bcol, scol = st.columns([1, 1])
+            with bcol:
+                if st.button("📚 Remove bookmark", key=f"rl_unbm_{r['paper_id']}"):
+                    toggle_bookmark(r["paper_id"], add=False)
+                    st.rerun()
+
+            if bullets:
+                st.markdown("**LLM-generated Summary:**")
+                for b in bullets:
+                    st.markdown(f"- {b}  _(cites `{r['paper_id']}`)_")
+            else:
+                with scol:
+                    if st.button("🧠 Summarize", key=f"rl_sum_{r['paper_id']}"):
+                        if not r["abstract"]:
+                            st.error("No abstract available to summarize.")
+                        else:
+                            with st.spinner("Summarizing locally…"):
+                                try:
+                                    result = summarize.summarize_paper(
+                                        r["paper_id"], r["title"], r["abstract"]
+                                    )
+                                    conn2 = db.connect()
+                                    try:
+                                        db.save_summary(conn2, r["paper_id"],
+                                                         result.bullets, config.OLLAMA_MODEL)
+                                    finally:
+                                        conn2.close()
+                                    st.rerun()
+                                except llm.OllamaError as exc:
+                                    st.error(f"Ollama error: {exc}")
+
+
+# --- Review queue tab (OD16) ---------------------------------------------------
+def render_review_queue() -> None:
+    """HITL queue for hypothesis pitches (Task 5.2, OD16). Nothing auto-promotes."""
+    st.subheader("Review queue")
+    st.caption(
+        "Hypothesis pitches generated from the Research-gaps view. Every item "
+        "starts **pending** — approve or reject explicitly; nothing is "
+        "promoted automatically."
+    )
+    status_filter = st.radio("Filter", ["pending", "approved", "rejected", "all"],
+                             horizontal=True)
+    conn = db.connect()
+    try:
+        rows = db.list_review_queue(conn, status=None if status_filter == "all" else status_filter)
+    finally:
+        conn.close()
+
+    if not rows:
+        st.info(f"No {status_filter} items.")
+        return
+
+    for r in rows:
+        try:
+            datasets = json.loads(r.get("datasets_json") or "[]")
+            supporting = json.loads(r.get("supporting_ids_json") or "[]")
+        except (TypeError, json.JSONDecodeError):
+            datasets, supporting = [], []
+
+        badge = {"pending": "🟡", "approved": "🟢", "rejected": "🔴"}[r["status"]]
+        with st.expander(f"{badge} {r['title']}  ({r['status']})"):
+            st.caption(f"{r['gap_a_label']} ⟷ {r['gap_b_label']}")
+            st.write(r["claim"])
+            st.markdown(f"**Method sketch:** {r['method_sketch']}")
+            if datasets:
+                st.markdown("**Datasets:** " + ", ".join(f"`{d}`" for d in datasets))
+            st.markdown("**Supporting papers:** " + ", ".join(f"`{p}`" for p in supporting))
+            st.warning("⚠️ Unverified Candidate — not a validated research gap.")
+            if r["status"] == "pending":
+                acol, rcol = st.columns(2)
+                with acol:
+                    if st.button("✅ Approve", key=f"approve_{r['id']}"):
+                        conn2 = db.connect()
+                        try:
+                            db.set_review_status(conn2, r["id"], "approved")
+                        finally:
+                            conn2.close()
+                        st.rerun()
+                with rcol:
+                    if st.button("❌ Reject", key=f"reject_{r['id']}"):
+                        conn2 = db.connect()
+                        try:
+                            db.set_review_status(conn2, r["id"], "rejected")
+                        finally:
+                            conn2.close()
+                        st.rerun()
+
+
 # --- Tab dispatch ------------------------------------------------------------
-tab_search, tab_graph = st.tabs(["🔍 Search", "🕸️ Citation graph"])
-with tab_search:
-    render_search()
+tab_graph, tab_trending, tab_search, tab_reading, tab_review = st.tabs(
+    ["🕸️ Citation graph", "📈 Trending", "🔍 Search", "📚 Reading list", "🗂️ Review queue"]
+)
 with tab_graph:
     render_graph_view()
+with tab_trending:
+    render_trending()
+with tab_search:
+    render_search()
+with tab_reading:
+    render_reading_list()
+with tab_review:
+    render_review_queue()

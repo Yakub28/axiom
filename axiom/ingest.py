@@ -48,7 +48,10 @@ def short_id(openalex_id: str | None) -> str | None:
     """'https://openalex.org/W2741809807' -> 'W2741809807' (idempotent)."""
     if not openalex_id:
         return None
-    return openalex_id.rsplit("/", 1)[-1]
+    val = openalex_id.rsplit("/", 1)[-1]
+    if not re.match(r"^W\d+$", val):
+        raise ValueError(f"Invalid OpenAlex ID format: {val}")
+    return val
 
 
 def reconstruct_abstract(inverted_index: dict[str, list[int]] | None) -> str | None:
@@ -279,8 +282,7 @@ def ingest_to_sqlite(
     """
     db.init_db(conn)
     # Idempotent clean slate (mirrors the synthetic bootstrap).
-    for table in ("concepts", "citation_edges", "paper_provenance", "papers"):
-        conn.execute(f"DELETE FROM {table}")
+    db.reset_corpus(conn)
 
     parsed = [parse_work(w) for w in works]
     parsed = [p for p in parsed if p.openalex_id]

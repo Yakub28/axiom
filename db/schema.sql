@@ -55,6 +55,52 @@ CREATE TABLE IF NOT EXISTS paper_provenance (
     FOREIGN KEY (paper_id) REFERENCES papers(openalex_id)
 );
 
+-- Canonical concept-label mapping (Task 3.2, OD14). LLM-merged synonyms
+-- (e.g. "LoRA" / "Low-Rank Adaptation") persisted so canonicalization runs
+-- once per corpus, not per query. `source='manual'` rows are a hand-set
+-- override: re-running canonicalize.py never touches them.
+CREATE TABLE IF NOT EXISTS concept_canonical (
+    concept   TEXT PRIMARY KEY,          -- raw OpenAlex concept label
+    canonical TEXT NOT NULL,             -- canonical label this concept maps to
+    source    TEXT NOT NULL DEFAULT 'auto'   -- 'auto' (LLM) or 'manual' (override)
+);
+
+-- Cached 3-bullet paper summaries (Task 7.4, OD14). Computed once per paper on
+-- request (LLM call is the slow part); re-summarize with force=true to refresh.
+CREATE TABLE IF NOT EXISTS paper_summaries (
+    paper_id     TEXT PRIMARY KEY,       -- FK -> papers.openalex_id
+    bullets_json TEXT NOT NULL,          -- JSON list[str], exactly 3 bullets
+    model        TEXT NOT NULL,          -- which Ollama model produced it
+    created_at   DATETIME NOT NULL,
+    FOREIGN KEY (paper_id) REFERENCES papers(openalex_id)
+);
+
+-- HITL review queue (Task 5.2, OD16). One row per generated hypothesis
+-- pitch; no candidate is ever auto-promoted -- `status` only changes via an
+-- explicit approve/reject action (never automatically).
+CREATE TABLE IF NOT EXISTS review_queue (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    gap_a_label          TEXT NOT NULL,
+    gap_b_label          TEXT NOT NULL,
+    title                TEXT NOT NULL,
+    claim                TEXT NOT NULL,
+    method_sketch        TEXT NOT NULL,
+    datasets_json        TEXT NOT NULL,   -- JSON list[str]
+    supporting_ids_json  TEXT NOT NULL,   -- JSON list[str]
+    status               TEXT NOT NULL DEFAULT 'pending',  -- pending | approved | rejected
+    created_at           DATETIME NOT NULL
+);
+
+-- Bookmarked papers (Task 7.4, OD13). Single-user demo, no auth system exists,
+-- so no user_id column — one shared reading list. Summaries are NOT stored
+-- here: 3-bullet LLM summaries need the hypothesis pipeline's summarize_paper()
+-- (PBI 5, deferred), so this table is bookmark-only for now.
+CREATE TABLE IF NOT EXISTS reading_list (
+    paper_id TEXT PRIMARY KEY,           -- FK -> papers.openalex_id
+    added_at DATETIME NOT NULL,
+    FOREIGN KEY (paper_id) REFERENCES papers(openalex_id)
+);
+
 -- Read-path indexes for the UI filter bar and the P2 graph track.
 CREATE INDEX IF NOT EXISTS idx_papers_year    ON papers(publication_year);
 CREATE INDEX IF NOT EXISTS idx_papers_venue   ON papers(venue);

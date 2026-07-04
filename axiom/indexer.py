@@ -16,9 +16,12 @@ import sqlite3
 from axiom import config, db
 
 
-def reindex_qdrant(conn: sqlite3.Connection | None = None, *, log=print) -> int:
+def reindex_qdrant(conn: sqlite3.Connection | None = None, *,
+                    collection: str | None = None, log=print) -> int:
     """Encode every paper in SQLite and (re)load the Qdrant collection.
 
+    `collection` overrides `config.COLLECTION_NAME` (used by the eval-corpus
+    ingest, OD11, to target a separate collection without touching axiom_v1).
     Returns the number of points in the collection afterwards. Recreates the
     collection (idempotent wipe) so dense + sparse vectors always agree with the
     current SQLite corpus.
@@ -78,7 +81,7 @@ def reindex_qdrant(conn: sqlite3.Connection | None = None, *, log=print) -> int:
         for r in rows
     ]
 
-    store = AxiomQdrant()
+    store = AxiomQdrant(collection=collection)
     log(f"[qdrant] recreating collection '{store.collection}'...")
     store.recreate_collection()  # idempotent wipe + recreate
     store.upsert_papers(payloads, vectors, sparse_vectors=sparse_vectors)

@@ -395,35 +395,36 @@ PAPERS = [
 
 def load_sqlite() -> None:
     conn = db.connect()
-    db.init_db(conn)
-    # Idempotent: clear prior synthetic rows before reinserting.
-    for table in ("concepts", "citation_edges", "paper_provenance", "papers"):
-        conn.execute(f"DELETE FROM {table}")
+    try:
+        db.init_db(conn)
+        # Idempotent: clear prior synthetic rows before reinserting.
+        db.reset_corpus(conn)
 
-    for p in PAPERS:
-        db.insert_paper(
-            conn,
-            openalex_id=p["id"],
-            title=p["title"],
-            abstract=p["abstract"],
-            publication_year=p["year"],
-            venue_id=None,
-            venue=p["venue"],
-            cited_by_count=p["cited_by_count"],
-            doi=None,
-        )
-        db.insert_concepts(conn, p["id"], [(c, lvl) for c, lvl in p["concepts"]])
-        db.insert_provenance(
-            conn, paper_id=p["id"], source="synthetic",
-            abstract=p["abstract"], has_fulltext=False,
-        )
-        # Citation edges from synthetic referenced_works[].
-        db.insert_citation_edges(
-            conn, [(p["id"], dst, p["year"]) for dst in p["references"]]
-        )
-    conn.commit()
-    print(f"[sqlite] wrote {len(PAPERS)} papers to {config.DB_PATH}")
-    conn.close()
+        for p in PAPERS:
+            db.insert_paper(
+                conn,
+                openalex_id=p["id"],
+                title=p["title"],
+                abstract=p["abstract"],
+                publication_year=p["year"],
+                venue_id=None,
+                venue=p["venue"],
+                cited_by_count=p["cited_by_count"],
+                doi=None,
+            )
+            db.insert_concepts(conn, p["id"], [(c, lvl) for c, lvl in p["concepts"]])
+            db.insert_provenance(
+                conn, paper_id=p["id"], source="synthetic",
+                abstract=p["abstract"], has_fulltext=False,
+            )
+            # Citation edges from synthetic referenced_works[].
+            db.insert_citation_edges(
+                conn, [(p["id"], dst, p["year"]) for dst in p["references"]]
+            )
+        conn.commit()
+        print(f"[sqlite] wrote {len(PAPERS)} papers to {config.DB_PATH}")
+    finally:
+        conn.close()
 
 
 def main() -> None:

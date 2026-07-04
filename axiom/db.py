@@ -6,6 +6,7 @@ place so the data contract is enforced from a single module.
 from __future__ import annotations
 
 import hashlib
+import json
 import sqlite3
 from datetime import datetime, timezone
 from typing import Iterable, Sequence
@@ -26,6 +27,23 @@ def init_db(conn: sqlite3.Connection) -> None:
     """Create all tables/indexes from the shared schema (idempotent)."""
     sql = config.SCHEMA_PATH.read_text(encoding="utf-8")
     conn.executescript(sql)
+    conn.commit()
+
+
+def reset_corpus(conn: sqlite3.Connection) -> None:
+    """Clear all corpus data tables in FK-safe order."""
+    _CORPUS_TABLES = (
+        "review_queue",
+        "paper_summaries",
+        "reading_list",
+        "concept_canonical",
+        "concepts",
+        "citation_edges",
+        "paper_provenance",
+        "papers",
+    )
+    for table in _CORPUS_TABLES:
+        conn.execute(f"DELETE FROM {table}")
     conn.commit()
 
 
@@ -108,6 +126,102 @@ def distinct_venues(conn: sqlite3.Connection) -> list[str]:
     return [r["venue"] for r in rows]
 
 
+def upsert_canonical(conn: sqlite3.Connection, concept: str, canonical: str,
+                      source: str = "auto") -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO concept_canonical (concept, canonical, source) "
+        "VALUES (?, ?, ?)",
+        (concept, canonical, source),
+    )
+
+
+def manual_canonical_concepts(conn: sqlite3.Connection) -> set[str]:
+    return {r["concept"] for r in
+            conn.execute("SELECT concept FROM concept_canonical WHERE source = 'manual'").fetchall()}
+
+
+def canonical_map(conn: sqlite3.Connection) -> dict[str, str]:
+    """concept -> canonical. Concepts with no row map to themselves (identity)."""
+    return {r["concept"]: r["canonical"] for r in
+            conn.execute("SELECT concept, canonical FROM concept_canonical").fetchall()}
+
+
+def save_summary(conn: sqlite3.Connection, paper_id: str, bullets: list[str],
+                  model: str, created_at: datetime | None = None) -> None:
+    ts = (created_at or datetime.now(timezone.utc)).isoformat()
+    conn.execute(
+        "INSERT OR REPLACE INTO paper_summaries (paper_id, bullets_json, model, created_at) "
+        "VALUES (?, ?, ?, ?)",
+        (paper_id, json.dumps(bullets), model, ts),
+    )
+    conn.commit()
+
+
+def get_summary(conn: sqlite3.Connection, paper_id: str) -> list[str] | None:
+    row = conn.execute(
+        "SELECT bullets_json FROM paper_summaries WHERE paper_id = ?", (paper_id,)
+    ).fetchone()
+    return json.loads(row["bullets_json"]) if row else None
+
+
+def add_to_review_queue(conn: sqlite3.Connection, *, gap_a_label: str, gap_b_label: str,
+                         title: str, claim: str, method_sketch: str,
+                         datasets: list[str], supporting_paper_ids: list[str],
+                         created_at: datetime | None = None) -> int:
+    ts = (created_at or datetime.now(timezone.utc)).isoformat()
+    cur = conn.execute(
+        "INSERT INTO review_queue (gap_a_label, gap_b_label, title, claim, "
+        "method_sketch, datasets_json, supporting_ids_json, status, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?)",
+        (gap_a_label, gap_b_label, title, claim, method_sketch,
+         json.dumps(datasets), json.dumps(supporting_paper_ids), ts),
+    )
+    conn.commit()
+    return cur.lastrowid
+
+
+def list_review_queue(conn: sqlite3.Connection, status: str | None = None) -> list[sqlite3.Row]:
+    if status:
+        return conn.execute(
+            "SELECT * FROM review_queue WHERE status = ? ORDER BY created_at DESC", (status,)
+        ).fetchall()
+    return conn.execute("SELECT * FROM review_queue ORDER BY created_at DESC").fetchall()
+
+
+def set_review_status(conn: sqlite3.Connection, item_id: int, status: str) -> None:
+    assert status in ("pending", "approved", "rejected")
+    conn.execute("UPDATE review_queue SET status = ? WHERE id = ?", (status, item_id))
+    conn.commit()
+
+
+def add_bookmark(conn: sqlite3.Connection, paper_id: str,
+                  added_at: datetime | None = None) -> None:
+    ts = (added_at or datetime.now(timezone.utc)).isoformat()
+    conn.execute(
+        "INSERT OR REPLACE INTO reading_list (paper_id, added_at) VALUES (?, ?)",
+        (paper_id, ts),
+    )
+    conn.commit()
+
+
+def remove_bookmark(conn: sqlite3.Connection, paper_id: str) -> None:
+    conn.execute("DELETE FROM reading_list WHERE paper_id = ?", (paper_id,))
+    conn.commit()
+
+
+def list_bookmarks(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """Bookmarked papers, most-recently-added first, joined with paper metadata."""
+    return conn.execute(
+        """
+        SELECT r.paper_id, r.added_at, p.title, p.abstract, p.publication_year,
+               p.venue, p.cited_by_count, p.doi
+        FROM reading_list r
+        JOIN papers p ON p.openalex_id = r.paper_id
+        ORDER BY r.added_at DESC
+        """
+    ).fetchall()
+
+
 def year_bounds(conn: sqlite3.Connection) -> tuple[int, int] | None:
     row = conn.execute(
         "SELECT MIN(publication_year) AS lo, MAX(publication_year) AS hi FROM papers"
@@ -144,6 +258,4 @@ def papers_by_ids(
     return {r["openalex_id"]: r for r in rows}
 
 
-# TODO(P2): the ingestion track plugs in here — replace synthetic loading with
-# OpenAlex fetch + inverted-index abstract reconstruction, writing into the same
-# tables via these helpers so the contract stays stable.
+

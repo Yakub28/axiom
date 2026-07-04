@@ -78,3 +78,35 @@ SPARSE_STOPWORDS = frozenset({
     "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "with",
     "is", "are", "be", "by", "as", "at", "that", "this", "from", "how",
 })
+
+# --- Trends / velocity --------------------------------------------------------
+# No PROJECT_PLAN.md exists in this repo (decision OD10) so there is no formula
+# to inherit; velocity is computed on-demand (no persisted KEYWORD table) as a
+# two-window normalized-frequency log2-ratio. See axiom/velocity.py.
+VELOCITY_MIN_CONCEPT_LEVEL = 1   # drop level-0 concepts (e.g. "Computer science") — too broad to trend
+VELOCITY_MIN_FREQ = 5            # recent_count below this => low_confidence flag
+VELOCITY_TOP_K = 50              # default keywords returned by get_top_velocity_keywords
+VELOCITY_EPSILON = 1e-4          # smoothing so the log2 ratio never blows up on a 0 count
+
+# --- Eval corpus (OD11, PBI 8 / Task 8.2) -------------------------------------
+# Real ACL/EMNLP/COLING/NAACL corpus (2020-2025, ~23k papers), pulled from the
+# team's `main` branch for retrieval eval only. Kept in a SEPARATE SQLite db +
+# Qdrant collection from the gaps/velocity corpus (data/axiom.db, axiom_v1):
+# this dataset has no citation edges and no concept/keyword tags, so it cannot
+# feed OD9 gap detection or the OD10 velocity engine — only search/nDCG@10 eval.
+EVAL_DATASET_PATH = PROJECT_ROOT / "data" / "FULL_DATASET.jsonl"
+EVAL_DB_PATH = PROJECT_ROOT / "data" / "eval.db"
+EVAL_COLLECTION_NAME = "axiom_eval_v1"
+EVAL_SAMPLE_SIZE = 1500          # stratified across (venue, year) buckets
+
+# --- API (PBI 6, OD12) --------------------------------------------------------
+# CORS allowlist for local React dev servers (Vite default 5173, CRA default 3000).
+CORS_ORIGINS = ["http://localhost:3000", "http://localhost:5173"]
+
+# --- Local LLM via Ollama (OD14) ----------------------------------------------
+# No API key, no cost -- runs on this machine. Unblocks T3.2 (keyword
+# canonicalization) and reading-list summaries (T7.4); PBI 5's hypothesis
+# pipeline will use the same client later.
+OLLAMA_HOST = "http://localhost:11434"
+OLLAMA_MODEL = "qwen2.5:7b"        # good instruction-following/JSON at 7B, fast locally
+OLLAMA_TIMEOUT = 120.0

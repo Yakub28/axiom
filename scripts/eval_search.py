@@ -95,8 +95,10 @@ def run_checks(encoder: Specter2Encoder, store: AxiomQdrant) -> int:
         return 1
     # Replicate the app's default filter: full year span, all venues.
     conn = db.connect()
-    year_range = db.year_bounds(conn)
-    conn.close()
+    try:
+        year_range = db.year_bounds(conn)
+    finally:
+        conn.close()
 
     failures = 0
     print(f"[check] hybrid + year filter {year_range} (the app's default)\n")

@@ -1,112 +1,203 @@
 # Axiom
 
-**Thesis-discovery tool for researchers.** Axiom is *not* a paper search engine —
-it surfaces what's trending in a subfield and what conceptual space is unexplored.
+**LLMs for Sciences: Research Trends & Gaps Extraction Tool.** Axiom is *not* a
+paper search engine — it surfaces two complementary signals from scholarly
+metadata: **research trends** (which concepts are accelerating) and **research
+gaps** (conceptual regions that are semantically close but barely connected by
+citation). Semantic search is the foundation those signals stand on, not the
+product itself.
 
-This repo currently contains the **P1 data-foundation seam**: a shared SQLite
-contract, a local Qdrant vector store, a SPECTER2 encoder, a synthetic 30-paper
-bootstrap, and a Streamlit search page. It runs end-to-end against synthetic data
-so the UI is unblocked before real ingestion and the production encoder land.
-
-> Out of scope in P1 (do not expect them here): velocity engine, citation graph,
-> LangGraph, gap pipeline, React, FastAPI. Interface seams are marked
-> `# TODO(P2)`.
+> This README reflects the **as-built** system (2026-07-04), which has
+> diverged from the original plan in several places — see
+> `docs/DECISIONS.md` (OD6–OD14) for the full rationale on every divergence,
+> and `Backlog.md` for the task-by-task status.
 
 ---
 
-## Run order (exact commands)
+## What's built
 
-From the repo root:
+| Capability | Status |
+|---|---|
+| OpenAlex ingest (topic-snowball) → SQLite → SPECTER2 → Qdrant | ✅ |
+| Hybrid dense+sparse (RRF) retrieval | ✅ |
+| NetworkX citation graph + PageRank influence | ✅ |
+| Research-gap detector (community-pairs, OD9) | ✅ |
+| Velocity/trends engine (OD10) | ✅ |
+| Keyword canonicalization (local Ollama, OD14) | ✅ |
+| Reading list — bookmarks + local-LLM summaries (OD13/OD14) | ✅ |
+| FastAPI service layer (OD12) | ✅ |
+| nDCG@10 retrieval eval, real corpus (OD11) | ✅ (mean 0.453, single-pass labels) |
+| Streamlit UI: Search, Trending, Citation graph, Reading list | ✅ |
+| LLM hypothesis pitch + HITL review queue (PBI 5) | ❌ needs a design pass |
+| React frontend | ❌ not started |
+| Threshold calibration, gap-quality rating (PBI 8) | ❌ needs real human input |
+
+See `docs/demo_examples.md` for real, reproducible output of every ✅ row.
+
+---
+
+## Prerequisites
+
+- **Docker** (for Qdrant).
+- **Python 3.10–3.12.** ⚠️ Not 3.13/3.14 — the pinned `torch`/`transformers`
+  have no wheels there.
+- **[Ollama](https://ollama.com)**, running locally (`ollama serve`), with a
+  model pulled (default `qwen2.5:7b`: `ollama pull qwen2.5:7b`) — only needed
+  for keyword canonicalization and reading-list summaries (OD14). Everything
+  else runs without it.
+
+---
+
+## Run order (from the repo root)
 
 ```bash
-# 1. Install deps (a virtualenv is recommended)
+# 1. venv + pinned deps
+python3.12 -m venv .venv
+. .venv/bin/activate
 pip install -r requirements.txt
 
-# 2. Start Qdrant (Docker)
+# 2. Start Qdrant
 docker compose up -d
 
-# 3. Load the synthetic corpus into SQLite + Qdrant (idempotent)
+# 3a. Quick demo: 30-paper synthetic corpus (idempotent)
 python scripts/bootstrap_synthetic.py
 
-# 4. Launch the search UI
+# 3b. OR a real corpus via OpenAlex topic-snowball (needs internet; no API key)
+python scripts/ingest_openalex.py --topic "retrieval-augmented generation" --target 500
+
+# 4. (optional) Keyword canonicalization — needs `ollama serve` running
+python scripts/canonicalize_concepts.py
+
+# 5. Launch the UI
 streamlit run app/streamlit_app.py
+
+# 6. (optional) FastAPI service layer, for API/React consumption
+uvicorn api.main:app --reload   # docs at http://localhost:8000/docs
 ```
 
-Step 3 is safe to re-run: it wipes and recreates the `axiom_v1` collection and
-rewrites the SQLite rows.
+### Verify it end-to-end
 
-> First run of step 3 downloads the `allenai/specter2_base` weights (~440 MB).
-> With no GPU it runs on CPU and prints a warning — the model is unchanged.
+```bash
+python scripts/smoke_test_api.py     # FastAPI, 17 checks against live data
+python scripts/eval_search.py --check   # search acceptance checks (LoRA/RAG top-1)
+```
 
 ---
 
-## Five demo queries
+## Retrieval evaluation (nDCG@10, OD11)
 
-Type these into the search box; each should return intuitively relevant papers:
+A separate, real 1,500-paper ACL/EMNLP/COLING/NAACL sample (kept apart from
+the main corpus — see OD11) drives an nDCG@10 harness:
 
-1. `reducing hallucination in retrieval-augmented generation`
-2. `parameter efficient fine-tuning with low-rank adapters`
-3. `low-resource machine translation with limited parallel data`
-4. `evaluating language models beyond accuracy`
-5. `chain-of-thought reasoning and self-consistency`
+```bash
+python scripts/ingest_eval_corpus.py     # one-time: samples + embeds the eval corpus
+python scripts/eval_ndcg.py --report eval/report.md
+```
 
-Then exercise the filter bar: restrict **Venue** to e.g. `ACL` + `EMNLP`, or
-drag the **Year range** to 2024–2025, and watch the result set change.
+Current result: **mean nDCG@10 = 0.453** (hybrid). See `eval/report.md` and
+its caveats (relevance judgments are single-pass/AI-drafted, not yet
+human-reviewed).
 
 ---
 
-## Architecture (P1)
+## Architecture
 
 ```
-OpenAlex (P2)            db/schema.sql  ← shared data contract (the team codes against this)
-     │                        │
-     ▼                        ▼
-scripts/bootstrap_synthetic.py ──► SQLite (data/axiom.db)
-     │                                  │
-     │  SPECTER2 (axiom/embed.py)       │ papers · concepts · citation_edges · provenance
-     ▼                                  ▼
-  768-dim vectors ──► Qdrant `axiom_v1` (axiom/qdrant_client.py)
-                              │
-                              ▼
-                   app/streamlit_app.py  (search box + venue/year filters)
+OpenAlex (snowball, OD7)                     db/schema.sql  ← shared data contract
+        │                                          │
+        ▼                                          ▼
+scripts/ingest_openalex.py ──────────────►  SQLite (data/axiom.db)
+        │                                          │
+        │ SPECTER2 (axiom/embed.py)                │ papers · concepts · citation_edges
+        │ + BM25 sparse (axiom/sparse.py)          │ paper_provenance · reading_list
+        ▼                                          │ concept_canonical · paper_summaries
+  Qdrant `axiom_v1` (axiom/qdrant_client.py)        │
+   dense + sparse named vectors                     │
+        │                                          │
+        │                        axiom/graph.py ◄──┤ (NetworkX, PageRank, OD6/OD8)
+        │                        axiom/gaps.py  ◄──┤ (Louvain communities + gap pairs, OD9)
+        │                        axiom/velocity.py ◄┤ (trend ranking, OD10)
+        │                        axiom/canonicalize.py, axiom/summarize.py ◄─ axiom/llm.py (Ollama, OD14)
+        ▼
+┌─────────────────────────────┐        ┌──────────────────────────────┐
+│ app/streamlit_app.py         │        │ api/main.py (FastAPI, OD12)   │
+│ Search · Trending · Graph/   │        │ 13 REST routes over the same  │
+│ Gaps · Reading list          │        │ axiom/* modules — no React    │
+│ (imports axiom/* directly)   │        │ consumer yet                  │
+└─────────────────────────────┘        └──────────────────────────────┘
 ```
-
-- **Data contract:** `db/schema.sql`. Schema changes must be logged in
-  `docs/DECISIONS.md`.
-- **Embeddings:** SPECTER2 (`allenai/specter2_base`, 768-dim), CLS pooling over
-  `title [SEP] abstract`; GPU → CPU fallback with a warning.
-- **Vector store:** Qdrant, one point per paper, payload
-  `paper_id, title, year, venue, cited_by_count, concepts[]`; hybrid search =
-  dense vector + payload filter on `venue`/`year`.
-- **Graph store:** NetworkX-first (decision OD6). The `citation_edges` table
-  already exists for the P2 graph track.
-- **Frontend:** Streamlit.
 
 ---
 
 ## Layout
 
 ```
-db/schema.sql                    shared SQLite contract
-axiom/config.py                  paths, Qdrant host/port, collection, model id
-axiom/db.py                      SQLite connect/init/insert helpers
+db/schema.sql                    shared SQLite contract (papers, concepts, citation_edges,
+                                  paper_provenance, reading_list, concept_canonical, paper_summaries)
+axiom/config.py                  paths, Qdrant/Ollama config, all tunable constants
+axiom/db.py                      SQLite connect/init/insert/query helpers (all SQL lives here)
+axiom/ingest.py                  OpenAlex snowball fetch (pure-Python, no torch)
 axiom/embed.py                   SPECTER2 encoder (GPU→CPU fallback)
-axiom/qdrant_client.py           collection lifecycle, upsert, search-with-filter
-scripts/bootstrap_synthetic.py   30 synthetic NLP papers → SQLite + Qdrant
-app/streamlit_app.py             search page + filter bar
-docker-compose.yml               qdrant service only
-docs/DECISIONS.md                committed decisions + schema change log
+axiom/sparse.py                  BM25-style sparse encoder (hashing trick)
+axiom/qdrant_client.py           AxiomQdrant: collection lifecycle, search, search_hybrid
+axiom/indexer.py                 shared embed+upsert path (bootstrap, ingest, eval corpus)
+axiom/graph.py                   NetworkX citation graph, PageRank influence
+axiom/gaps.py                    OD9 research-gap detector (Louvain + centroid gap-score)
+axiom/velocity.py                OD10 trend/velocity engine
+axiom/canonicalize.py            T3.2 LLM keyword canonicalization (OD14)
+axiom/summarize.py               T7.4 paper summarization (OD14)
+axiom/llm.py                     shared local-Ollama client (OD14)
+
+app/streamlit_app.py             4-tab UI: Search, Trending, Citation graph, Reading list
+api/main.py                      FastAPI service layer (OD12)
+
+scripts/bootstrap_synthetic.py   30-paper synthetic demo corpus
+scripts/ingest_openalex.py       real OpenAlex ingest CLI
+scripts/canonicalize_concepts.py runs T3.2 over the corpus
+scripts/ingest_eval_corpus.py    samples the real eval corpus (OD11)
+scripts/eval_search.py           search-mode comparison + acceptance checks
+scripts/eval_ndcg.py             nDCG@10 harness (OD11)
+scripts/smoke_test_api.py        FastAPI integration smoke test
+
+eval/ndcg_queries.json           15 queries, 86 single-pass AI-drafted relevance judgments
+eval/report.md                   generated nDCG@10 report
+
+docs/DECISIONS.md                every committed decision (OD1–OD14) + schema change log
+docs/demo_examples.md            real, reproducible output of every built feature
+docs/WALKTHROUGH.md              deep-dive on the original P1 seam (historical — see its banner)
+Backlog.md                       full task-by-task status (as-built vs. original plan)
+docker-compose.yml               Qdrant only
 ```
 
-> `qdrant/populate_qdrant.py` is a separate earlier experiment (different model
-> and collection) and is **not** part of the P1 seam.
+---
+
+## Limitations
+
+- **Corpus scope.** The default demo corpus is a 30-paper synthetic set; the
+  real-data path (`ingest_openalex.py`) snowballs from one seed topic to
+  ~500 papers (OD7) — not the ≥1k/≥5k multi-venue corpus the original plan
+  targeted (T2.3, not built by choice this round).
+- **Uncalibrated rankings.** `gap_score` and `velocity` are ranking heuristics,
+  not calibrated against labeled ground truth (T8.1 not built — needs real
+  labeled established/dead/hot topics).
+- **Hallucination controls.** Local-LLM outputs (canonicalization, summaries)
+  are constrained by system prompts (grounding-only instructions) and
+  span at most 3 bullets / small synonym groups — not independently verified
+  against a hallucination benchmark.
+- **English-only.** OpenAlex ingestion, SPECTER2, and the Ollama prompts all
+  assume English abstracts; no multilingual handling anywhere in the pipeline.
+- **Single-user.** No auth; the reading list is one shared list, not per-user.
 
 ---
 
 ## Troubleshooting
 
-- **"Cannot reach Qdrant" in the UI** → run `docker compose up -d`, wait a few
-  seconds, then `python scripts/bootstrap_synthetic.py`.
-- **"The index is empty"** → run the bootstrap script.
-- **Slow first encode** → expected on CPU; the weights download once and the
-  model is cached afterward.
+- **"Cannot reach Qdrant" in the UI** → `docker compose up -d`, wait a few
+  seconds, then bootstrap/ingest.
+- **"The index is empty"** → run `scripts/bootstrap_synthetic.py` or
+  `scripts/ingest_openalex.py`.
+- **Canonicalization/summaries fail with "Ollama unreachable"** → `ollama
+  serve` isn't running, or the model in `axiom.config.OLLAMA_MODEL` isn't
+  pulled (`ollama pull qwen2.5:7b`).
+- **Slow first encode** → expected on CPU; SPECTER2 weights download once and
+  are cached afterward.

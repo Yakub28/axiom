@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 import networkx as nx
 import numpy as np
 
+from axiom import db
 from axiom import graph as graphmod
 
 
@@ -81,11 +82,13 @@ def community_labels(conn, node2c: dict[str, int], top: int = 4) -> dict[int, li
     carries little signal; one concentrated in one cluster labels it well.
     """
     rows = conn.execute("SELECT paper_id, concept FROM concepts").fetchall()
+    canon = db.canonical_map(conn)
     tf: dict[int, Counter] = defaultdict(Counter)
     for r in rows:
         cid = node2c.get(r["paper_id"])
         if cid is not None:
-            tf[cid][r["concept"]] += 1
+            concept = canon.get(r["concept"], r["concept"])
+            tf[cid][concept] += 1
     n_comm = len(tf) or 1
     # document frequency = number of communities containing each concept
     df: Counter = Counter()
