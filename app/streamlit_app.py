@@ -366,8 +366,6 @@ _GRAPH3D_TEMPLATE = """
 """
 
 
-def _graph_html(sub, focus_id: str | None = None,
-                node_colors: dict[str, str] | None = None, height: int = 650) -> str:
 def _graph_html(sub: nx.DiGraph, node_colors: dict[str, str] | None = None,
                 node_cids: dict[str, int] | None = None, height: int = 500) -> str:
     """
