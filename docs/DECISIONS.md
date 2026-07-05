@@ -337,6 +337,57 @@ tabs with zero exceptions (`AppTest`).
 
 ---
 
+## OD17 — Composite gap G-score + τ calibration scaffold (supersedes OD16's "No composite G-score")
+
+OD16 declined to build a composite G-score: with no `PROJECT_PLAN.md` §7.3 to
+supply weights (established in OD10), inventing them would "manufacture false
+calibration-sounding precision," so OD9's raw `gap_score = similarity /
+(1 + inter_citations)` stayed the only ranking signal.
+
+**What changed:** the missing half was never the formula — it was a way to make
+the numbers empirical instead of arbitrary. OD17 adds that: a calibration
+scaffold (`scripts/export_gap_labels.py` → human labels → `scripts/
+calibrate_gap_thresholds.py` → `eval/calibration.json`) that turns a labeled
+mini-set into a chosen threshold τ (and, optionally, weights) via a
+precision/recall sweep. With that consumer in place, a composite score stops
+being false precision and becomes a *calibratable* one.
+
+**The G-score.** `axiom/gaps.GapCandidate` now carries `g_score`, its four
+normalized `components`, and `meets_threshold`. All four signals already exist
+on the OD9 candidates — no new data, no new deps:
+
+```
+G = w_sim·S + w_disc·D + w_vel·V + w_auth·A
+  S = clamp(centroid cosine, 0, 1)                     relatedness
+  D = 1 / (1 + inter_citations)                        disconnection (OD9's factor, now additive)
+  V = 1 / (1 + 2^(−v̄))                                 trend heat: logistic of mean concept velocity (OD10); 0.5 when the corpus spans <2 years
+  A = min-max over the run of mean log1p(cited_by)     authority/substance of the two clusters
+defaults (UNCALIBRATED): w_sim=0.4, w_disc=0.3, w_vel=0.2, w_auth=0.1; τ=0.65
+```
+
+Authority uses each paper's global `cited_by_count` (already on the graph nodes)
+rather than PageRank — zero extra passes; PageRank is the noted alternative if a
+future calibration wants intra-corpus centrality instead. Candidates now rank by
+`g_score`; with the defaults S+D dominate, so ordering stays close to OD9's.
+
+**Consumption.** `axiom/config.load_calibration()` reads `eval/calibration.json`
+when present (merged over the defaults, ignoring a malformed file) and
+`gaps.analyze` calls it each run — so dropping in a calibrated file overrides
+τ/weights with no code change, closing Task 8.1's acceptance criterion
+("`evaluate_gap()` reads calibrated thresholds from config, overrides dev
+default 0.65").
+
+**Honest caveat / still deferred.** The weights and τ ship UNCALIBRATED and are
+labeled so in code, the API (`components`/`meets_threshold` are transparent), the
+Streamlit gap detail, and this doc. Producing the human labels
+(`eval/labels/gap_labels.csv`) is out of scope — it needs real annotator input,
+the same PBI 8 gap OD11/OD16 already flag. A "notebook" (`calibration.ipynb`)
+was specified; this repo keeps eval tooling as scripts that emit markdown
+reports (`scripts/eval_ndcg.py`), so the scaffold follows that discipline
+instead — pure-stdlib, importable, unit-tested (`tests/test_calibrate.py`).
+
+---
+
 ## Schema change log
 
 | Date       | Change                                              | By |

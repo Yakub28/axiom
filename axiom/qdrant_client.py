@@ -286,6 +286,7 @@ class AxiomQdrant:
         return out
 
 
-# TODO(P2): the velocity engine and citation-graph tracks will read the same
-# payload fields here (year, concepts, cited_by_count) to rank trending work and
-# detected gaps — extend these methods with their filters rather than forking.
+# NOTE: the P2 tracks landed differently than originally sketched here — velocity
+# (OD10) reads concepts/papers straight from SQLite rather than Qdrant payloads,
+# and gap detection (OD9) consumes fetch_dense_vectors() above for community
+# centroids. No shared payload-filter extension was needed.

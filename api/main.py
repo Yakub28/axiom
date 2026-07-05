@@ -143,6 +143,9 @@ class GapCandidateOut(BaseModel):
     semantic_similarity: float
     inter_citations: int
     gap_score: float
+    g_score: float                       # OD17 composite score
+    components: dict[str, float]         # {similarity, disconnection, velocity, authority}
+    meets_threshold: bool               # g_score >= calibrated τ
 
 
 class HypothesisPitchOut(BaseModel):
@@ -315,7 +318,7 @@ def graph_gaps():
     return GapAnalysisOut.model_validate(get_gap_analysis())
 
 
-# --- Reading list (OD13): bookmarks only, no LLM summaries (PBI 5 not built) --
+# --- Reading list (OD13) + cached LLM summaries (OD14) -----------------------
 @app.get("/reading-list", response_model=list[BookmarkOut])
 def reading_list():
     conn = db.connect()

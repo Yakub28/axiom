@@ -27,10 +27,11 @@ product itself.
 | Reading list — bookmarks + local-LLM summaries (OD13/OD14) | ✅ |
 | FastAPI service layer (OD12) | ✅ |
 | nDCG@10 retrieval eval, real corpus (OD11) | ✅ (mean 0.453, single-pass labels) |
-| Streamlit UI: Search, Trending, Citation graph, Reading list | ✅ |
-| LLM hypothesis pitch + HITL review queue (PBI 5) | ❌ needs a design pass |
+| Streamlit UI: Search, Trending, Citation graph, Reading list, Review queue | ✅ |
+| LLM hypothesis pitch + HITL review queue (PBI 5) | ✅ (OD16 — grounded pitch + rule-based verifier + review queue) |
 | React frontend | ❌ not started |
-| Threshold calibration, gap-quality rating (PBI 8) | ❌ needs real human input |
+| Composite gap G-score (OD17) | ✅ (uncalibrated defaults) |
+| Threshold (τ) calibration scaffold (PBI 8) | ⚠️ scaffold built (OD17); τ/weights still need human labels |
 
 See `docs/demo_examples.md` for real, reproducible output of every ✅ row.
 
@@ -82,6 +83,17 @@ python scripts/smoke_test_api.py     # FastAPI, 17 checks against live data
 python scripts/eval_search.py --check   # search acceptance checks (LoRA/RAG top-1)
 ```
 
+### Unit tests
+
+```bash
+pip install -r requirements-dev.txt
+pytest                               # unit tests for velocity/gaps/graph/db/api/…
+```
+
+The suite is self-contained (no Qdrant/Ollama/torch needed at runtime): heavy
+deps are stubbed in `tests/conftest.py`, so it runs both in the project `.venv`
+and on a bare Python 3.13/3.14 env where the ML stack can't install.
+
 ---
 
 ## Retrieval evaluation (nDCG@10, OD11)
@@ -121,9 +133,9 @@ scripts/ingest_openalex.py ──────────────►  SQLite
         ▼
 ┌─────────────────────────────┐        ┌──────────────────────────────┐
 │ app/streamlit_app.py         │        │ api/main.py (FastAPI, OD12)   │
-│ Search · Trending · Graph/   │        │ 13 REST routes over the same  │
-│ Gaps · Reading list          │        │ axiom/* modules — no React    │
-│ (imports axiom/* directly)   │        │ consumer yet                  │
+│ Search · Trending · Graph/   │        │ 17 REST routes over the same  │
+│ Gaps · Reading list · Review │        │ axiom/* modules — no React    │
+│ queue (imports axiom/* directly)│      │ consumer yet                  │
 └─────────────────────────────┘        └──────────────────────────────┘
 ```
 
@@ -146,9 +158,10 @@ axiom/gaps.py                    OD9 research-gap detector (Louvain + centroid g
 axiom/velocity.py                OD10 trend/velocity engine
 axiom/canonicalize.py            T3.2 LLM keyword canonicalization (OD14)
 axiom/summarize.py               T7.4 paper summarization (OD14)
+axiom/hypothesis.py              OD16 hypothesis pitch + rule-based verifier (PBI 5)
 axiom/llm.py                     shared local-Ollama client (OD14)
 
-app/streamlit_app.py             4-tab UI: Search, Trending, Citation graph, Reading list
+app/streamlit_app.py             5-tab UI: Search, Trending, Citation graph, Reading list, Review queue
 api/main.py                      FastAPI service layer (OD12)
 
 scripts/bootstrap_synthetic.py   30-paper synthetic demo corpus
@@ -161,6 +174,9 @@ scripts/smoke_test_api.py        FastAPI integration smoke test
 
 eval/ndcg_queries.json           15 queries, 86 single-pass AI-drafted relevance judgments
 eval/report.md                   generated nDCG@10 report
+
+tests/                           pytest unit suite (conftest stubs torch/qdrant so it
+                                  runs without the ML stack); requirements-dev.txt
 
 docs/DECISIONS.md                every committed decision (OD1–OD14) + schema change log
 docs/demo_examples.md            real, reproducible output of every built feature
@@ -177,9 +193,12 @@ docker-compose.yml               Qdrant only
   real-data path (`ingest_openalex.py`) snowballs from one seed topic to
   ~500 papers (OD7) — not the ≥1k/≥5k multi-venue corpus the original plan
   targeted (T2.3, not built by choice this round).
-- **Uncalibrated rankings.** `gap_score` and `velocity` are ranking heuristics,
-  not calibrated against labeled ground truth (T8.1 not built — needs real
-  labeled established/dead/hot topics).
+- **Uncalibrated rankings.** `gap_score`, the composite `g_score` (OD17), and
+  `velocity` are ranking heuristics. The G-score's weights and threshold τ ship
+  as uncalibrated defaults: the calibration pipeline exists
+  (`scripts/export_gap_labels.py` → `scripts/calibrate_gap_thresholds.py` →
+  `eval/calibration.json`, consumed by `gaps.analyze`), but the human labels it
+  needs (`eval/labels/gap_labels.csv`) are not yet produced (T8.1).
 - **Hallucination controls.** Local-LLM outputs (canonicalization, summaries)
   are constrained by system prompts (grounding-only instructions) and
   span at most 3 bullets / small synonym groups — not independently verified

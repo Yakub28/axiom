@@ -13,6 +13,7 @@ so the fetch path runs on any Python. Embedding/upsert lives in axiom.indexer.
 """
 from __future__ import annotations
 
+import re
 import time
 from collections import Counter
 from dataclasses import dataclass, field
@@ -45,11 +46,15 @@ class ParsedWork:
 # Pure helpers (no network) — easy to unit-test
 # ---------------------------------------------------------------------------
 def short_id(openalex_id: str | None) -> str | None:
-    """'https://openalex.org/W2741809807' -> 'W2741809807' (idempotent)."""
+    """'https://openalex.org/W2741809807' -> 'W2741809807' (idempotent).
+
+    Accepts any OpenAlex entity id (W works, S sources/venues, A authors, ...):
+    parse_work() reuses this to shorten both work ids and the venue's source id.
+    """
     if not openalex_id:
         return None
     val = openalex_id.rsplit("/", 1)[-1]
-    if not re.match(r"^W\d+$", val):
+    if not re.match(r"^[A-Z]\d+$", val):
         raise ValueError(f"Invalid OpenAlex ID format: {val}")
     return val
 

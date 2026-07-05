@@ -92,9 +92,10 @@ CREATE TABLE IF NOT EXISTS review_queue (
 );
 
 -- Bookmarked papers (Task 7.4, OD13). Single-user demo, no auth system exists,
--- so no user_id column — one shared reading list. Summaries are NOT stored
--- here: 3-bullet LLM summaries need the hypothesis pipeline's summarize_paper()
--- (PBI 5, deferred), so this table is bookmark-only for now.
+-- so no user_id column — one shared reading list. Summaries are intentionally
+-- NOT stored here: 3-bullet LLM summaries (axiom/summarize.py, OD14) are cached
+-- per-paper in paper_summaries above, keyed by paper_id, so they survive
+-- un-bookmarking and are shared with any future consumer.
 CREATE TABLE IF NOT EXISTS reading_list (
     paper_id TEXT PRIMARY KEY,           -- FK -> papers.openalex_id
     added_at DATETIME NOT NULL,

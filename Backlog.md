@@ -99,7 +99,7 @@ Build greenfield from empty repo to full stack: **OpenAlex → SQLite → SPECTE
 | 10 | T4.3 | ~~Neo4j Docker + migration~~ | T4.1 | Saleh | High | ❌→ dropped (OD6, NetworkX-first) |
 | 11 | T4.4 | ~~Gap Step 2 on Neo4j Cypher~~ | T4.3, T4.2 | Saleh | High | ❌→ dropped (OD6) |
 | 12 | T5.1 | LangGraph 5-node agent graph | T4.4, T3.1 | Yahor | High | ✅→ rescoped as **OD16**: single `axiom/llm.py` call over an OD9 gap candidate, no LangGraph dependency |
-| 13 | T5.2 | Gap Step 3 + composite G scoring + HITL queue backend | T5.1 | Yahor | High | ⚠️→ Step 3 + HITL queue built (OD16); no composite G-score (no PROJECT_PLAN.md formula to calibrate, same reasoning as OD10) |
+| 13 | T5.2 | Gap Step 3 + composite G scoring + HITL queue backend | T5.1 | Yahor | High | ✅→ Step 3 + HITL queue (OD16); composite G-score built (**OD17**: g_score over similarity/disconnection/velocity/authority, uncalibrated defaults + calibration scaffold) |
 | 14 | T6.1 | FastAPI service (search, trends, gap, reading list) | T2.2, T3.1, T5.2 | Yahor | High | ✅→ built: search/trends/graph/gaps (OD12), reading-list (OD13), summaries (OD14), hypothesis+review-queue (OD16) — 17 routes |
 | 15 | T7.1 | Trending Topics page (Streamlit then React) | T3.1, T6.1 | Yakub | High | ✅→ Streamlit "📈 Trending" tab built directly on `axiom.velocity` (bypasses FastAPI/PBI6, same pattern as Search/Citation-graph); React migration deprioritized (OD15) — Streamlit is the final UI |
 | 16 | T7.2 | Citation/keyword graph page | T3.1, T6.1 | Yakub | High | ⚠️→ delivered as **3D citation graph + Research-gaps view** (supersedes 2D ≤50-node) |
@@ -107,7 +107,7 @@ Build greenfield from empty repo to full stack: **OpenAlex → SQLite → SPECTE
 | 18 | T7.4 | Reading List page (bookmarks + cited summaries) | T5.1, T6.1 | Yakub | High | ✅→ built: bookmarks (OD13) + cited summaries (OD14, local Ollama, `summarize_paper()` built independent of PBI 5's LangGraph node) |
 | 19 | T2.3 | Corpus expansion to ≥5k (add NeurIPS 2024) | T2.2 | Saleh | High | ❌ at 500 |
 | 20 | T2.4 | PDF extract pipeline (Marker/PyMuPDF) for intro chunks | T2.3 | Saleh | Medium | ❌ not built |
-| 21 | T8.1 | Calibration notebook (τ, δ_D, δ_F) | T4.4, T5.2 | Yahor | High | ❌ not built |
+| 21 | T8.1 | Calibration notebook (τ, δ_D, δ_F) | T4.4, T5.2 | Yahor | High | ⚠️→ scaffold built (**OD17**): `export_gap_labels.py` → human labels → `calibrate_gap_thresholds.py` → `eval/calibration.json` consumed by `gaps.analyze`; a script (not .ipynb, matching repo discipline); labels still needed |
 | 22 | T8.2 | nDCG@10 + gap quality evaluation | T2.3, T5.2 | All | High | ⚠️→ nDCG@10 built (OD11, single-pass labels, 0.453 hybrid); gap-quality rating still needs human raters |
 | 23 | T8.3 | README runbook + mentor demo package | T7.3, T8.1 | All | High | ✅→ `README.md` rewritten, `docs/demo_examples.md` (real output, incl. a real hypothesis pitch) + a mentor one-pager built; no literal UI screenshots (can't capture a browser session in this environment) |
 | 24 | T1.4 | `docs/DECISIONS.md` | - | Yahor | Medium | ✅ (logs OD6–OD16) |

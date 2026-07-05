@@ -17,7 +17,9 @@ from pathlib import Path
 # Make the repo root importable when Streamlit runs this file directly.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+import altair as alt
 import networkx as nx
+import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
@@ -411,6 +413,15 @@ def _render_gap_detail(g, gap) -> None:
         f"**{gap.inter_citations}** citation(s) connect **{gap.a.size}** and "
         f"**{gap.b.size}** papers — a bridge largely unbuilt."
     )
+    if getattr(gap, "components", None):
+        c = gap.components
+        flag = " ✅ meets threshold" if gap.meets_threshold else ""
+        st.caption(
+            f"**G-score {gap.g_score:.2f}**{flag} — similarity {c['similarity']:.2f} · "
+            f"disconnection {c['disconnection']:.2f} · velocity {c['velocity']:.2f} · "
+            f"authority {c['authority']:.2f}. ⚠️ Uncalibrated defaults (OD17); weights "
+            f"and threshold need human labels — see scripts/calibrate_gap_thresholds.py."
+        )
     cola, colb = st.columns(2)
     for col, comm in ((cola, gap.a), (colb, gap.b)):
         with col:
@@ -592,6 +603,24 @@ def render_graph_view() -> None:
 
 
 # --- Trending tab -------------------------------------------------------------
+def _velocity_bar_chart(items: list, color: str) -> None:
+    """One horizontal bar per concept, input order preserved (items arrive sorted)."""
+    df = pd.DataFrame(
+        {"concept": [k.concept for k in items],
+         "velocity": [k.velocity for k in items]}
+    )
+    chart = (
+        alt.Chart(df)
+        .mark_bar(color=color)
+        .encode(
+            x=alt.X("velocity:Q", title="velocity (log2 share ratio)"),
+            y=alt.Y("concept:N", sort=None, title=None),  # sort=None => keep input order
+            tooltip=["concept", alt.Tooltip("velocity:Q", format="+.2f")],
+        )
+    )
+    st.altair_chart(chart, use_container_width=True)
+
+
 def render_trending() -> None:
     """Concepts ranked by velocity: normalized-frequency log2-ratio, recent vs prior window."""
     st.subheader("Trending concepts")
@@ -629,10 +658,32 @@ def render_trending() -> None:
         f"({analysis.total_recent} papers)"
     )
 
-    rising = [k for k in analysis.keywords if k.velocity > 0][:15]
+    # Charts show only meaningful movers: a concept in a single paper isn't a
+    # trend, and every 0->1 concept pins to the same epsilon-ceiling velocity, so
+    # charting them yields a flat wall of identical bars. Require >= MIN papers in
+    # the window a concept is moving from/to (recent for risers, prior for faders).
+    min_ct = config.VELOCITY_MIN_CHART_COUNT
+    rising = [k for k in analysis.keywords
+              if k.velocity > 0 and k.recent_count >= min_ct][:15]
+    fading = [k for k in reversed(analysis.keywords)
+              if k.velocity < 0 and k.prior_count >= min_ct][:10]
+
+    if rising or fading:
+        st.caption(
+            f"Charts show concepts with ≥{min_ct} papers in the compared window; "
+            "single-paper blips are excluded here but still listed below."
+        )
+    else:
+        st.info(
+            f"No concept reaches ≥{min_ct} papers in a window for this filter — "
+            "the corpus is too sparse to chart a trend. See the ranked list below."
+        )
     if rising:
         st.markdown("##### Top risers")
-        st.bar_chart({k.concept: k.velocity for k in rising})
+        _velocity_bar_chart(rising, color="#4c78a8")
+    if fading:
+        st.markdown("##### Top faders")
+        _velocity_bar_chart(fading, color="#d62728")
 
     st.markdown("##### Ranked keywords")
     for i, k in enumerate(analysis.keywords, 1):
@@ -731,8 +782,8 @@ def render_review_queue() -> None:
 
     for r in rows:
         try:
-            datasets = json.loads(r.get("datasets_json") or "[]")
-            supporting = json.loads(r.get("supporting_ids_json") or "[]")
+            datasets = json.loads(r["datasets_json"] or "[]")
+            supporting = json.loads(r["supporting_ids_json"] or "[]")
         except (TypeError, json.JSONDecodeError):
             datasets, supporting = [], []
 

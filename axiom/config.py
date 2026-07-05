@@ -6,6 +6,7 @@ strings scattered across the codebase.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 # --- Paths -------------------------------------------------------------------
@@ -87,6 +88,12 @@ VELOCITY_MIN_CONCEPT_LEVEL = 1   # drop level-0 concepts (e.g. "Computer science
 VELOCITY_MIN_FREQ = 5            # recent_count below this => low_confidence flag
 VELOCITY_TOP_K = 50              # default keywords returned by get_top_velocity_keywords
 VELOCITY_EPSILON = 1e-4          # smoothing so the log2 ratio never blows up on a 0 count
+# A concept seen in only ONE paper in a window isn't a trend — its velocity pins
+# to the epsilon ceiling (every 0->1 concept ties at the same value), so the
+# Trending charts would show a flat wall of identical bars. Require at least this
+# many papers in the window a concept is moving from/to before charting it; the
+# full ranked list below the charts still shows everything, low-volume flagged.
+VELOCITY_MIN_CHART_COUNT = 2
 
 # --- Eval corpus (OD11, PBI 8 / Task 8.2) -------------------------------------
 # Real ACL/EMNLP/COLING/NAACL corpus (2020-2025, ~23k papers), pulled from the
@@ -98,6 +105,44 @@ EVAL_DATASET_PATH = PROJECT_ROOT / "data" / "FULL_DATASET.jsonl"
 EVAL_DB_PATH = PROJECT_ROOT / "data" / "eval.db"
 EVAL_COLLECTION_NAME = "axiom_eval_v1"
 EVAL_SAMPLE_SIZE = 1500          # stratified across (venue, year) buckets
+
+# --- Composite gap G-score + threshold calibration (OD17, PBI 8 / Task 8.1) ---
+# OD16 deferred a composite G-score for lack of a formula to calibrate. OD17
+# reverses that now that a calibration scaffold exists (scripts/export_gap_labels
+# + scripts/calibrate_gap_thresholds): G blends four normalized signals already
+# on the OD9 gap candidates. These weights and τ are UNCALIBRATED DEFAULTS — the
+# calibration script overwrites eval/calibration.json from human labels, and
+# load_calibration() below prefers that file when present.
+G_SCORE_WEIGHTS = {
+    "similarity":    0.4,   # centroid cosine — how topically related the two clusters are
+    "disconnection": 0.3,   # 1/(1+inter_citations) — how weakly they cite each other
+    "velocity":      0.2,   # logistic of mean concept velocity — how "hot" the region is
+    "authority":     0.1,   # normalized mean log(cited_by) — how substantial the clusters are
+}
+GAP_TAU_DEFAULT = 0.65      # G >= τ flags a candidate "meets threshold" (dev default, uncalibrated)
+CALIBRATION_PATH = PROJECT_ROOT / "eval" / "calibration.json"
+
+
+def load_calibration() -> dict:
+    """Return {'tau': float, 'weights': {...}}, calibrated file merged over defaults.
+
+    Reads eval/calibration.json (written by scripts/calibrate_gap_thresholds.py)
+    when it exists and parses; otherwise — or on any malformed file — falls back
+    to the uncalibrated defaults so gap ranking always works pre-calibration.
+    """
+    tau = GAP_TAU_DEFAULT
+    weights = dict(G_SCORE_WEIGHTS)
+    try:
+        data = json.loads(CALIBRATION_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError, OSError):
+        return {"tau": tau, "weights": weights}
+    if isinstance(data.get("tau"), (int, float)):
+        tau = float(data["tau"])
+    if isinstance(data.get("weights"), dict):
+        weights.update({k: float(v) for k, v in data["weights"].items()
+                        if k in weights and isinstance(v, (int, float))})
+    return {"tau": tau, "weights": weights}
+
 
 # --- API (PBI 6, OD12) --------------------------------------------------------
 # CORS allowlist for local React dev servers (Vite default 5173, CRA default 3000).
